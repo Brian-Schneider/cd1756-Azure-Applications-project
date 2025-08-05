@@ -10,6 +10,7 @@ from flask_session import Session
 
 app = Flask(__name__)
 app.config.from_object(Config)
+wsgi_app = app.wsgi_app
 # TODO: Add any logging levels and handlers with app.logger
 logger = logging.getLogger('FlaskWebProject')
 logger.setLevel(logging.DEBUG)
