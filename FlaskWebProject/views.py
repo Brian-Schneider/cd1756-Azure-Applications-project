@@ -60,6 +60,7 @@ def post(id):
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    log = app.logger
     if current_user.is_authenticated:
         return redirect(url_for('home'))
     form = LoginForm()
@@ -67,11 +68,13 @@ def login():
         user = User.query.filter_by(username=form.username.data).first()
         if user is None or not user.check_password(form.password.data):
             flash('Invalid username or password')
+            log.warning('Invalid username or password for user: %s', form.username.data)
             return redirect(url_for('login'))
         login_user(user, remember=form.remember_me.data)
         next_page = request.args.get('next')
         if not next_page or url_parse(next_page).netloc != '':
             next_page = url_for('home')
+        log.info('User %s logged in successfully.', user.username)
         return redirect(next_page)
     session["state"] = str(uuid.uuid4())
     auth_url = _build_auth_url(scopes=Config.SCOPE, state=session["state"])
@@ -79,6 +82,7 @@ def login():
 
 @app.route(Config.REDIRECT_PATH)  # Its absolute URL must match your app's redirect_uri set in AAD
 def authorized():
+    log = app.logger
     if request.args.get('state') != session.get("state"):
         return redirect(url_for("home"))  # No-OP. Goes back to Index page
     if "error" in request.args:  # Authentication/Authorization failure
@@ -86,7 +90,12 @@ def authorized():
     if request.args.get('code'):
         cache = _load_cache()
         # TODO: Acquire a token from a built msal app, along with the appropriate redirect URI
-        result = None
+        msal_app = _build_msal_app(cache=cache)
+        result = msal_app.acquire_token_by_authorization_code(
+            request.args['code'],
+            scopes=Config.SCOPE,
+            redirect_uri=url_for('authorized', _external=True)
+        )
         if "error" in result:
             return render_template("auth_error.html", result=result)
         session["user"] = result.get("id_token_claims")
@@ -95,6 +104,7 @@ def authorized():
         user = User.query.filter_by(username="admin").first()
         login_user(user)
         _save_cache(cache)
+        log.info('User %s logged in successfully using MS Authentication.', user.username)
     return redirect(url_for('home'))
 
 @app.route('/logout')
@@ -112,17 +122,48 @@ def logout():
 
 def _load_cache():
     # TODO: Load the cache from `msal`, if it exists
-    cache = None
+    cache = msal.SerializableTokenCache()
+    if 'token_cache' in session:
+        cache.deserialize(session['token_cache'])
     return cache
 
 def _save_cache(cache):
-    # TODO: Save the cache, if it has changed
-    pass
+    #TODO: Save the cache, if it has changed
+    if cache.has_state_changed:
+        session['token_cache'] = cache.serialize()
 
 def _build_msal_app(cache=None, authority=None):
     # TODO: Return a ConfidentialClientApplication
-    return None
+    if cache is None:
+        cache = msal.SerializableTokenCache()
+    if authority is None:
+        authority = Config.AUTHORITY
+    client_id = Config.CLIENT_ID
+    client_credential = Config.CLIENT_SECRET
+    try:
+        return msal.ConfidentialClientApplication(
+            client_id=client_id,
+            client_credential=client_credential,
+            authority=authority,
+            token_cache=cache
+        )
+    except ValueError as e:
+        raise ValueError("Failed to create MSAL app: " + str(e))
 
 def _build_auth_url(authority=None, scopes=None, state=None):
     # TODO: Return the full Auth Request URL with appropriate Redirect URI
-    return None
+    if authority is None:
+        authority = Config.AUTHORITY
+    if scopes is None:
+        scopes = Config.SCOPE
+    if state is None:
+        state = str(uuid.uuid4())
+    msal_app = _build_msal_app(authority=authority)
+    try:
+        return msal_app.get_authorization_request_url(
+            scopes=scopes,
+            state=state,
+            redirect_uri=url_for('authorized', _external=True)
+        )
+    except ValueError as e:
+        raise ValueError("Failed to build auth URL: " + str(e))
